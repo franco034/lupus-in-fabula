@@ -38,7 +38,7 @@ function assignRoles(players) {
     
     const numContadini = Math.max(0, count - numLupi - numVeggente - numProtettore - numProstituta - numGiullare);
 
-    // Mappa per gestire le preferenze in modo più pulito
+    // Mappa per gestire le preferenze
     const roleCounts = {
         'Lupo': numLupi,
         'Veggente': numVeggente,
@@ -73,7 +73,7 @@ function assignRoles(players) {
         }
     });
 
-    // 4. RIEMPIMENTO CASUALE PER CHI NON HA AVUTO IL RUOLO PREFERITO O HA MESSO "CASUALE"
+    // 4. RIEMPIMENTO CASUALE
     rolesPool = shuffle(rolesPool);
     remainingPlayers.forEach((p, i) => {
         assigned.push({ ...p, role: rolesPool[i] || 'Contadino' });
@@ -91,7 +91,30 @@ io.on('connection', (socket) => {
             rooms[roomUpper] = { players: [], master: socket.id, started: false };
         }
 
-        rooms[roomUpper].players.push({ id: socket.id, name, preference });
+        // RICOLLEGAMENTO INTELLIGENTE
+        let existingPlayer = rooms[roomUpper].players.find(p => p.name === name);
+
+        if (existingPlayer) {
+            // Aggiorna l'ID del Master se era lui
+            if (rooms[roomUpper].master === existingPlayer.id) {
+                rooms[roomUpper].master = socket.id;
+            }
+            existingPlayer.id = socket.id;
+            existingPlayer.preference = preference;
+
+            // Se la partita era già iniziata, rimandagli la carta
+            if (rooms[roomUpper].started && existingPlayer.role) {
+                let info = { compagni: [] };
+                if (existingPlayer.role === 'Lupo') {
+                    info.compagni = rooms[roomUpper].players
+                        .filter(ap => ap.role === 'Lupo' && ap.id !== existingPlayer.id)
+                        .map(ap => ap.name);
+                }
+                socket.emit('role_assigned', { role: existingPlayer.role, info: info });
+            }
+        } else {
+            rooms[roomUpper].players.push({ id: socket.id, name, preference });
+        }
 
         io.to(roomUpper).emit('update_players', {
             players: rooms[roomUpper].players,
@@ -106,7 +129,6 @@ io.on('connection', (socket) => {
             const assignedPlayers = assignRoles(r.players);
             r.players = assignedPlayers;
 
-            // Invia i ruoli privatamente a ciascun socket id
             assignedPlayers.forEach(p => {
                 let info = { compagni: [] };
                 if (p.role === 'Lupo') {
@@ -119,24 +141,13 @@ io.on('connection', (socket) => {
         }
     });
 
-    // NUOVO EVENTO: RESET DELLA PARTITA
     socket.on('reset_game', (room) => {
         const r = rooms[room];
-        // Controlla che la stanza esista e che a premere il tasto sia il Master
         if (r && r.master === socket.id) {
             r.started = false;
-            
-            // Ripulisce i ruoli assegnati per sicurezza, mantenendo solo i dati base (id, nome, preferenza)
             r.players = r.players.map(p => ({ id: p.id, name: p.name, preference: p.preference }));
-            
-            // Avvisa tutti i dispositivi di tornare alla schermata della lobby
             io.to(room).emit('game_reset');
-            
-            // Rinfresca la lista dei giocatori
-            io.to(room).emit('update_players', {
-                players: r.players,
-                master: r.master
-            });
+            io.to(room).emit('update_players', { players: r.players, master: r.master });
         }
     });
 
@@ -144,16 +155,19 @@ io.on('connection', (socket) => {
         for (const room in rooms) {
             const index = rooms[room].players.findIndex(p => p.id === socket.id);
             if (index !== -1) {
-                rooms[room].players.splice(index, 1);
-                // Se il Master si disconnette, passa il comando al successivo
-                if (rooms[room].master === socket.id && rooms[room].players.length > 0) {
-                    rooms[room].master = rooms[room].players[0].id;
+                // Rimuove il giocatore solo se la partita NON è iniziata
+                if (!rooms[room].started) {
+                    rooms[room].players.splice(index, 1);
+                    if (rooms[room].master === socket.id && rooms[room].players.length > 0) {
+                        rooms[room].master = rooms[room].players[0].id;
+                    }
                 }
+                
                 io.to(room).emit('update_players', {
                     players: rooms[room].players,
                     master: rooms[room].master
                 });
-                // Distruggi la stanza se vuota
+                
                 if (rooms[room].players.length === 0) delete rooms[room];
                 break;
             }
